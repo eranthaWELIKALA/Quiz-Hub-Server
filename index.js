@@ -4,6 +4,7 @@ const axios = require('axios');
 const socketIo = require('socket.io');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
@@ -23,28 +24,27 @@ app.use(cors());
 
 let quizzes = {};
 let activeSessions = {};
+let intervals = {};
 
-let score = 1000;
-let firstAnswerReceived = false;
-const correctAnswer = "jenkins";
-let users = [];
-let winners = [
-];
-
-function decreaseScore() {
-    setInterval(() => {
-        if (score > 0) {
-            score -= 1;
-            console.log(`Score: ${score}`);
+function decreaseScore(sessionId) {
+    intervals[sessionId] = setInterval(() => {
+        if (activeSessions[sessionId].score > 100) {
+            activeSessions[sessionId].score -= 1;
+            console.log(`Score[${sessionId}]: ${activeSessions[sessionId].score}`);
         }
     }, 100);
 }
 
-function sortWinners() {
-    winners.sort((a, b) => b.score - a.score);
-    winners.forEach((winner, index) => {
-        winner.id = index + 1;
-    });
+function stopDecreasingScore(sessionId) {
+    if (intervals[sessionId]) {
+        clearInterval(intervals[sessionId]);
+    }
+}
+
+function sortWinners(sessionId) {
+    if (activeSessions[sessionId]) {
+        activeSessions[sessionId].winners.sort((a, b) => b.score - a.score);
+    }
 }
 
 app.post('/create-quiz', (req, res) => {
@@ -63,7 +63,7 @@ app.post('/create-quiz', (req, res) => {
                 return { error: `Invalid correct answer index at index ${index}.` };
             }
 
-            const defaultTime = { questionDuration: 30, answeringDuration: 10 };
+            const defaultTime = { questionDuration: 5, answeringDuration: 20 };
             q.time = q.time || defaultTime;
 
             return q;
@@ -119,6 +119,8 @@ app.post('/join-quiz', (req, res) => {
 
         // Store the user in the session
         activeSessions[sessionId].users.push({ userId, name });
+        activeSessions[sessionId].winners.push({ id: userId, name: name, score: 0 });
+        io.to(sessionId).emit('winners', activeSessions[sessionId].winners);
 
         res.status(200).json({ message: 'User registered successfully!', userId });
     } catch (error) {
@@ -139,7 +141,7 @@ app.post('/next-question', (req, res) => {
             return res.status(400).json({ error: 'Invalid quiz session ID.' });
         }
 
-        io.emit('next-question', { sessionId, question });
+        io.to(sessionId).emit('next-question', { sessionId, question });
 
         res.status(200).json({ message: 'Next question sent successfully!' });
     } catch (error) {
@@ -171,64 +173,61 @@ app.get('/leaderboard', (req, res) => {
     }
 });
 
-app.post('/submit', async (req, res) => {
-    try {
-        if (!req.body.email || !req.body.name || !req.body.answer) {
-            return res.status(400).json({ error: 'Invalid submission data.' });
-        }
-        if (users.includes(req.body.email)) {
-            return res.status(400).json({ error: 'You have already submitted an answer.' });
-        } else {
-            users.push(req.body.email);
-        }
-        if (!firstAnswerReceived) {
-            firstAnswerReceived = true;
-            decreaseScore();
-        }
-        let userScore = score;
+app.post('/trigger-jenkins', async (req, res) => {
+    const { sessionId } = req.body; // Extract sessionId from the request body
+    triggerJenkinsWebhook(sessionId);
+    res.status(200).json({ message: 'Jenkins server triggered successfully!' });
+});
 
-        const { name, answer } = req.body;
-        if (correctAnswer == answer) {
-            try {
-                await axios.post(
-                    `http://localhost:8080/generic-webhook-trigger/invoke?token=atlink-cicd-demo`,
-                    { name: name }
-                );
-            } catch (error) {
-                console.log('Error while triggering jenkins pipeline:', error.response?.data || error.message);
-            }
-            winners.push({ name, score: userScore });
-            sortWinners();
-            io.emit('winners', winners);
+const triggerJenkinsWebhook = async (sessionId) => {
+    try {
+        try {
+            sortWinners(sessionId); // You can use sessionId here
+            await axios.post(
+                `${process.env.JENKINS_URL}/generic-webhook-trigger/invoke?token=${process.env.JENKINS_TOKEN}`,
+                { name: activeSessions[sessionId].winners[0] || "Unknown" }
+            );
+        } catch (error) {
+            console.log('Error while triggering jenkins pipeline:', error.response?.data || error.message);
         }
-        res.status(200).json({ message: 'Answer submitted successfully!' });
     } catch (error) {
         console.log(error);
-        res.status(500).json({ message: 'Unknown Error!' });
     }
-});
+}
 
 io.on('connection', (socket) => {
     console.log('A user connected');
 
-    // Send the current winners list to the new client when they connect
-    sortWinners();
-    socket.emit('winners', winners);
+    socket.on('retrieve-winners', ({ sessionId }) => {
+        if (activeSessions[sessionId]) {
+            socket.join(sessionId);
+            sortWinners(sessionId);
+            io.to(sessionId).emit('winners', activeSessions[sessionId].winners);
+        }
+    });
 
-    socket.on('join-quiz', ({ sessionId }) => {
-        socket.join(sessionId);
-        console.log(`User joined quiz session: ${sessionId}`);
+    socket.on('join-quiz', ({ sessionId }, callback) => {
+        if (activeSessions[sessionId]) {
+            socket.join(sessionId);
+            console.log(`User joined quiz session: ${sessionId}`);
+            callback({ success: true, message: 'Joined successfully' });
+        }
+        else {
+            callback({ success: false, message: 'Invalid quiz ID' });
+        }
     });
 
     socket.on('start-quiz', ({ quizId }, callback) => {
         const sessionId = uuidv4();
-        activeSessions[sessionId] = { quizId, currentQuestionIndex: 0, users: [] };
+        activeSessions[sessionId] = { quizId, currentQuestionIndex: 0, users: [], firstAnswerReceived: false, score: 1000, winners: [] };
         callback({ sessionId });
     });
 
     socket.on('join-quiz-host', ({ sessionId }) => {
-        socket.join(sessionId);
-        console.log(`Host joined quiz session ${sessionId}`);
+        if (activeSessions[sessionId]) {
+            socket.join(sessionId);
+            console.log(`Host joined quiz session ${sessionId}`);
+        }
     });
 
     socket.on('next-question', ({ sessionId }) => {
@@ -244,12 +243,14 @@ io.on('connection', (socket) => {
 
             if (questionData) {
                 io.to(sessionId).emit('next-question', questionData);
+                stopDecreasingScore(sessionId);
                 activeSessions[sessionId].currentQuestionIndex++;
-                firstAnswerReceived = false;
-                score = 1000;
+                activeSessions[sessionId].firstAnswerReceived = false;
+                activeSessions[sessionId].score = 1000;
             }
             else {
                 io.to(sessionId).emit('quiz-ended');
+                triggerJenkinsWebhook(sessionId);
             }
         }
         else {
@@ -261,11 +262,13 @@ io.on('connection', (socket) => {
     });
 
     socket.on('reveal-answer', ({ sessionId }) => {
-        io.to(sessionId).emit('reveal-answer');  // Broadcast to all clients in the session
-        console.log(`Reveal answer in session ${sessionId}`);
+        if (activeSessions[sessionId]) {
+            io.to(sessionId).emit('reveal-answer');  // Broadcast to all clients in the session
+            console.log(`Reveal answer in session ${sessionId}`);
+        }
     });
 
-    socket.on('submit-answer', ({ sessionId, userId, answer }) => {        
+    socket.on('submit-answer', ({ sessionId, userId, answer }) => {
         // Ensure session and users exist
         if (!activeSessions[sessionId] || !activeSessions[sessionId].users) {
             console.log(`Session ${sessionId} not found or has no users.`);
@@ -279,15 +282,15 @@ io.on('connection', (socket) => {
         if (!user) {
             console.log(`User ${userId} not found in session ${sessionId}`);
             return;
-        }        
-
-        // If first answer is received, decrease score
-        if (!firstAnswerReceived) {
-            firstAnswerReceived = true;
-            decreaseScore();
         }
 
-        let userScore = score;
+        // If first answer is received, decrease score
+        if (!activeSessions[sessionId].firstAnswerReceived) {
+            activeSessions[sessionId].firstAnswerReceived = true;
+            decreaseScore(sessionId);
+        }
+
+        let userScore = activeSessions[sessionId].score;
 
         if (!quizzes[quizId] || !quizzes[quizId][currentQuestionIndex]) {
             console.log(`Invalid quiz id or no quizes created yet`);
@@ -296,29 +299,26 @@ io.on('connection', (socket) => {
         const questionData = quizzes[quizId][currentQuestionIndex];
         // Check if the answer is correct
         if (questionData.correctAnswer === parseInt(answer)) {
-            let winnerIndex = winners.findIndex(w => w.id === user.userId);
+            let winnerIndex = activeSessions[sessionId].winners.findIndex(w => w.id === user.userId);
             if (winnerIndex !== -1) {
-                winners[winnerIndex].score = userScore;
+                activeSessions[sessionId].winners[winnerIndex].score += userScore;
             }
             else {
-                winners.push({ id: user.userId, name: user.name, score: userScore });
+                activeSessions[sessionId].winners.push({ id: user.userId, name: user.name, score: userScore });
             }
-
-            // Sort winners by score (higher score first)
-            winners.sort((a, b) => b.score - a.score);
-
-            // Emit updated winners list
-            io.emit('winners', winners);
         }
-        else {            
-            winners.push({ id: user.userId, name: user.name, score: 0 });
-
-            // Sort winners by score (higher score first)
-            winners.sort((a, b) => b.score - a.score);
+        else {
+            let winnerIndex = activeSessions[sessionId].winners.findIndex(w => w.id === user.userId);
+            if (winnerIndex === -1) {
+                activeSessions[sessionId].winners.push({ id: user.userId, name: user.name, score: 0 });
+            }
         }
+
+        // Sort winners by score (higher score first)
+        sortWinners(sessionId);
 
         // Emit updated winners list
-        io.emit('winners', winners);
+        io.to(sessionId).emit('winners', activeSessions[sessionId].winners);
     });
 
     socket.on('disconnect', () => {
