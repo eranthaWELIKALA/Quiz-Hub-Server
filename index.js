@@ -47,6 +47,14 @@ function sortWinners(sessionId) {
     }
 }
 
+app.get('/sessions', (req, res) => {
+    res.status(200).json(activeSessions);
+})
+
+app.get('/get-quizes', (req, res) => {
+    res.status(200).json(quizzes);
+})
+
 app.post('/create-quiz', (req, res) => {
     try {
         const { questions } = req.body;
