@@ -13,7 +13,6 @@ This is the **backend server** for **Quiz Hub**, a real-time multiplayer quiz ga
 - **Node.js** – JavaScript runtime  
 - **Express.js** – Backend framework  
 - **Socket.io** – Real-time WebSocket communication  
-- **MongoDB** – Database (if used)  
 - **dotenv** – For environment variables  
 
 ## 📦 Installation & Setup  
