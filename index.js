@@ -27,6 +27,16 @@ let quizzes = {};
 let activeSessions = {};
 let intervals = {};
 
+function generateUniqueCode() {
+    let code;
+    do {
+        code = Math.floor(10000 + Math.random() * 90000);
+    } while (
+        Object.values(activeSessions).some((session) => session.code === code)
+    );
+    return code.toString();
+}
+
 function decreaseScore(sessionId) {
     intervals[sessionId] = setInterval(() => {
         if (activeSessions[sessionId].score > 100) {
@@ -162,7 +172,7 @@ app.post("/create-quiz", (req, res) => {
 
 app.post("/join-quiz", (req, res) => {
     try {
-        const { name, sessionId } = req.body;
+        let { name, sessionId } = req.body;
 
         if (!name || !sessionId) {
             return res
@@ -170,10 +180,19 @@ app.post("/join-quiz", (req, res) => {
                 .json({ error: "Name and sessionId are required." });
         }
 
-        if (!activeSessions[sessionId]) {
+        if (
+            !activeSessions[sessionId] &&
+            !Object.values(activeSessions).some((session) => session.code == sessionId)
+        ) {
             return res
                 .status(HttpStatusCode.BadRequest)
-                .json({ error: "Invalid sessionId." });
+                .json({ error: "Invalid sessionId or code." });
+        }
+        if (!activeSessions[sessionId]) {
+            let [id, session] = Object.entries(activeSessions).find(
+                ([_, session]) => session.code == sessionId
+            );
+            sessionId = id;
         }
 
         // Generate a unique user ID
@@ -191,6 +210,7 @@ app.post("/join-quiz", (req, res) => {
         res.status(HttpStatusCode.Ok).json({
             message: "User registered successfully!",
             userId,
+            sessionId
         });
     } catch (error) {
         console.error("Error registering user:", error);
@@ -253,6 +273,7 @@ io.on("connection", (socket) => {
 
     socket.on("start-quiz", ({ quizId }, callback) => {
         const sessionId = uuidv4();
+        const sessionCode = generateUniqueCode();
         activeSessions[sessionId] = {
             quizId,
             currentQuestionIndex: 0,
@@ -260,8 +281,9 @@ io.on("connection", (socket) => {
             firstAnswerReceived: false,
             score: 1000,
             winners: [],
+            code: sessionCode,
         };
-        callback({ sessionId });
+        callback({ sessionId, code: sessionCode });
     });
 
     socket.on("join-quiz-host", ({ sessionId }) => {
